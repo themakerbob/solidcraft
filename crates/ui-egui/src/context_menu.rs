@@ -403,16 +403,22 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::HistoryControls => crate::timeline::transport_items(app),
         Target::Workspace => {
             let rendering = crate::render_workspace::active(app);
+            let drawing = app.drawing_workspace.active && !rendering;
+            let can_switch = app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy();
             let mut v = vec![
-                act("ui.workspace.design", "Design", "ws_design").with(json!({"workspace":"design"})).key(if rendering { "" } else { "current" }),
+                act("ui.workspace.design", "Design", "ws_design").with(json!({"workspace":"design"})).key(if !rendering && !drawing { "current" } else { "" }),
                 act("ui.workspace.render", "Render", "ws_render")
                     .with(json!({"workspace":"render"}))
                     .key(if rendering { "current" } else { "" })
-                    .on(app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy()),
+                    .on(can_switch),
             ];
-            for (w, icon) in [("Animation", "ws_animate"), ("Simulation", ""), ("Manufacture", ""), ("Drawing", "ws_drawing")] {
+            for (w, icon) in [("Animation", "ws_animate"), ("Simulation", ""), ("Manufacture", "")] {
                 v.push(act("ui.workspace", w, icon).key("coming later").on(false));
             }
+            v.push(act("ui.workspace.drawing", "Drawing", "ws_drawing")
+                .with(json!({"workspace":"drawing"}))
+                .key(if drawing { "current" } else { "" })
+                .on(can_switch));
             v
         }
         Target::Units => crate::prefs::UNITS
@@ -1591,11 +1597,12 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
                 app.set_status(e, true);
             }
         }
-        "ui.workspace" | "ui.workspace.design" | "ui.workspace.render" => {
-            if let Some(workspace) = p.get("workspace").and_then(Value::as_str)
-                && let Err(e) = crate::render_workspace::enter(app, workspace == "render")
-            {
-                app.set_status(e, true);
+        "ui.workspace" | "ui.workspace.design" | "ui.workspace.render" | "ui.workspace.drawing" => {
+            if let Some(workspace) = p.get("workspace").and_then(Value::as_str) {
+                match crate::render_workspace::enter(app, workspace == "render") {
+                    Ok(()) => app.drawing_workspace.active = workspace == "drawing",
+                    Err(e) => app.set_status(e, true),
+                }
             }
         }
         "ui.findJoint" => {

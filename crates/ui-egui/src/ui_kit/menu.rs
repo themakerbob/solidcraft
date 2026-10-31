@@ -367,7 +367,7 @@ pub(crate) fn workspace_menu(ui: &mut egui::Ui, items: &[Item], key_row: Option<
                     "Drawing" => ("drawing", "ui.workspace_drawing_description", None),
                     _ => continue,
                 };
-                let planned = tabs.is_none();
+                let planned = tabs.is_none() && slug != "drawing";
                 let current = item.shortcut == "current";
                 let (accent, soft) = if !planned && slug == "render" {
                     (t.render_fill, t.render_soft)

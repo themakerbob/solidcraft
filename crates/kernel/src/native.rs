@@ -351,3 +351,12 @@ mod tests {
         equal(&body, &restored);
     }
 }
+
+/// Portable exact B-rep of an evaluated solid for engineering drawings.
+/// Mesh-only imported bodies cannot be projected by exact HLR.
+pub fn portable_brep(body: &Body) -> Result<solidcraft_geom::brep::Brep> {
+    if body.mesh.is_some() {
+        return Err(invalid("mesh-only bodies have no exact B-rep"));
+    }
+    adapter::encode(&body.solid)
+}

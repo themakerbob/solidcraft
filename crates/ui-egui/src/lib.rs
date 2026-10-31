@@ -211,6 +211,7 @@ pub mod recovery_ui;
 pub mod ref_images;
 mod render_ui;
 pub mod render_workspace;
+pub mod drawing_workspace;
 #[cfg(test)]
 mod revolve_edit_tests;
 #[cfg(test)]
@@ -482,6 +483,7 @@ pub struct SolveApp {
     saving: Option<save_job::Saving>,
     pub viewport: viewport::ViewportState,
     pub render_workspace: render_workspace::State,
+    pub drawing_workspace: drawing_workspace::State,
     pub tool: Option<tools::Tool>,
     pub dialog: Option<dialogs::Dialog>,
     /// The Change Parameters window, when open.
@@ -721,6 +723,7 @@ impl SolveApp {
             saving: None,
             viewport: viewport::ViewportState::default(),
             render_workspace,
+            drawing_workspace: drawing_workspace::State::default(),
             tool: None,
             dialog: None,
             params: None,
@@ -2595,7 +2598,7 @@ impl SolveApp {
         let floating = render_workspace::active(self) || ui_kit::Container::new(ui.ctx(), ui_kit::Surface::Panel).floating();
         timeline::follow_view_pick(self);
         render_ui::focus_shortcut(self, ui);
-        let show_timeline = self.ui.show_timeline && !render_workspace::active(self) && !self.preferences.history_in_browser;
+        let show_timeline = self.ui.show_timeline && !render_workspace::active(self) && !self.drawing_workspace.active && !self.preferences.history_in_browser;
         let left_timeline = show_timeline && self.preferences.timeline_left;
         timeline_left::animate_folds(self, ui.ctx());
         if !floating && !self.embedded {
@@ -2640,7 +2643,15 @@ impl SolveApp {
                     && i.pointer.press_origin().is_some_and(|p| full.contains(p) && !shell::covered(self, p))
             });
             let blocked = !continuing_navigation && ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| shell::covered(self, p));
-            let mut viewport_ui = ui.new_child(egui::UiBuilder::new().max_rect(full).id_salt("floating_viewport"));
+            // Drawing is a document editor, not a 3D viewport: reserve the ribbon's
+            // actual measured bottom instead of drawing underneath floating chrome.
+            let workspace_rect = if self.drawing_workspace.active && !render_workspace::active(self) {
+                egui::Rect::from_min_max(
+                    egui::pos2(full.left(), cards.bottom.max(full.top()).min(full.bottom())),
+                    full.max,
+                )
+            } else { full };
+            let mut viewport_ui = ui.new_child(egui::UiBuilder::new().max_rect(workspace_rect).id_salt("floating_viewport"));
             if blocked {
                 // Disabled only to shield the scene from input under a card or menu; it must
                 // not fade, or the whole viewport dims whenever the pointer is over the shell.
@@ -2656,14 +2667,14 @@ impl SolveApp {
             timeline::timeline(self, ui);
         }
         dialog_column::layout(self, ui.available_rect_before_wrap());
-        if left_timeline {
+        if left_timeline && !self.drawing_workspace.active {
             timeline_left::left_panel(self, ui);
         }
         if render_workspace::active(self) {
             render_ui::shots_strip(self, ui);
             render_workspace::panel(self, ui);
         }
-        if self.ui.show_browser && !render_ui::focused(self) {
+        if self.ui.show_browser && !render_ui::focused(self) && !self.drawing_workspace.active {
             browser::browser(self, ui);
         }
         if floating {
@@ -2717,7 +2728,9 @@ impl SolveApp {
     }
 
     fn show_workspace(&mut self, ui: &mut egui::Ui) {
-        if render_workspace::active(self) {
+        if self.drawing_workspace.active && !render_workspace::active(self) {
+            drawing_workspace::show(&mut self.drawing_workspace, ui, &self.session);
+        } else if render_workspace::active(self) {
             render_workspace::show(self, ui);
         } else {
             viewport::show(self, ui);

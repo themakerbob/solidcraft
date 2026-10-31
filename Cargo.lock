@@ -4441,6 +4441,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "solidcraft-engine",
+ "solidcraft-geom",
  "solidcraft-gpu",
  "solidcraft-space-mouse",
  "syn 2.0.119",

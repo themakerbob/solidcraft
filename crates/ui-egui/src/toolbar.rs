@@ -1288,10 +1288,11 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
             t.secondary_line(&painter, [ws.right_top(), ws.right_bottom()], t.border);
         }
         let render = crate::render_workspace::active(app);
+        let drawing = app.drawing_workspace.active && !render;
         if render {
             crate::ui_kit::StageBar::workspace(ui, ws, "ws_render", app.tr("ui.render"), app.tr("ui.ribbon_workspace"));
         } else {
-            let workspace_icon = if render { "ws_render" } else { "ws_design" };
+            let workspace_icon = if drawing { "ws_drawing" } else { "ws_design" };
             icons::paint_icon(
                 &painter,
                 Rect::from_center_size(pos2(ws.center().x, ws.top() + if labels { 39.0 } else { 25.0 }), vec2(30.0, 30.0)),
@@ -1301,7 +1302,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
             ribbon_text(
                 ui,
                 pos2(ws.center().x, ws.top() + if labels { 69.0 } else { 50.0 }),
-                app.tr(if render { "ui.render" } else { "ui.design" }),
+                if drawing { app.tr("ui.drawing") } else { app.tr("ui.design") },
                 t.font_button,
                 t.text,
                 true,
@@ -1326,6 +1327,21 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         crate::scenario::publish_target("ribbon:workspace", ws);
         if render {
             crate::render_ui::stage_bar(app, ui, cards.ribbon);
+            return;
+        }
+        if drawing {
+            let tab_rect = Rect::from_min_max(pos2(ribbon_left, r.top()), pos2(r.right(), r.top() + TAB_ROW_HEIGHT));
+            painter.text(tab_rect.left_center() + vec2(16.0, 0.0), egui::Align2::LEFT_CENTER,
+                "DRAWING  /  SHEET  /  VIEWS", egui::FontId::proportional(15.0), t.text);
+            let tool_rect = Rect::from_min_max(pos2(ribbon_left + 12.0, r.top() + TAB_ROW_HEIGHT),
+                pos2(r.right() - 12.0, r.bottom()));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(tool_rect), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Drawing workspace · A3 landscape");
+                    ui.separator();
+                    ui.label("Base View  ·  Orientation  ·  Scale  ·  Fit Sheet — controls in drawing canvas");
+                });
+            });
             return;
         }
         ribbon_tabs(app, ui, Rect::from_min_max(pos2(ribbon_left, r.top()), pos2(r.right(), r.top() + TAB_ROW_HEIGHT)));

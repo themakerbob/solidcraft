@@ -33,6 +33,7 @@ minisign-verify = "0.3"
 zip = { workspace = true }
 # Rasterises the icon SVGs (assets/icons/ui/design/svg) at the size they are drawn.
 tiny-skia = { workspace = true }
+solidcraft-geom = { path = "../geom" }
 
 [target.'cfg(unix)'.dependencies]
 # Ends an agent's process group with the system call (MIT; already in the tree through zip).
