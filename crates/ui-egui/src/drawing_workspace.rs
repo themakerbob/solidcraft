@@ -1,4 +1,4 @@
-//! V0.1.8 Drawing workspace: selectable projected views and optional labels.
+//! V0.1.10 Drawing workspace: selectable projected views and optional labels.
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use solidcraft_geom::drawing_view::{NamedView, Scale, ViewFrame};
 use solidcraft_geom::Vec2 as ModelVec2;
@@ -23,45 +23,66 @@ pub struct State {
     model_revision: Option<(u64, u64)>,
     projected: HashMap<NamedView, Vec<ProjectedStroke>>,
     projection_error: Option<String>,
+    edit_view: Option<u64>,
+    sheet_settings: bool,
+    sheet_size: usize,
+    landscape: bool,
+    show_border: bool,
+    show_title: bool,
+    show_hidden: bool,
+    projection_first_angle: bool,
+
 }
 #[derive(Clone)]
 struct ProjectedStroke { points: Vec<ModelVec2>, hidden: bool, uncertain: bool }
 struct PlacedView { id: u64, frame: ViewFrame, orientation: NamedView, at: ModelVec2, show_label: bool }
 impl Default for State {
     fn default() -> Self {
-        Self { active: false, orientation: NamedView::Front, scale_index: 0, placed: Vec::new(), place_mode: false, zoom: 1.0, pan: Vec2::ZERO, selected: None, next_view_id: 1, drag_view: None, show_browser: true, show_view_labels: true, model_revision: None, projected: HashMap::new(), projection_error: None }
+        Self { active: false, orientation: NamedView::Front, scale_index: 0, placed: Vec::new(), place_mode: false, zoom: 1.0, pan: Vec2::ZERO, selected: None, next_view_id: 1, drag_view: None, show_browser: true, show_view_labels: true, model_revision: None, projected: HashMap::new(), projection_error: None, edit_view: None, sheet_settings: false, sheet_size: 1, landscape: true, show_border: true, show_title: true, show_hidden: true, projection_first_angle: false }
     }
 }
 const SCALES: [(f64,f64); 5] = [(1.0,1.0),(1.0,2.0),(1.0,5.0),(1.0,10.0),(2.0,1.0)];
-const A3_W: f32 = 420.0;
-const A3_H: f32 = 297.0;
+const SHEETS: [(&str, f32, f32); 5] = [
+    ("A4", 210.0, 297.0), ("A3", 297.0, 420.0), ("A2", 420.0, 594.0),
+    ("A1", 594.0, 841.0), ("A0", 841.0, 1189.0),
+];
+fn sheet_dimensions(state: &State) -> (f32, f32) {
+    let (_, short, long) = SHEETS[state.sheet_size];
+    if state.landscape { (long, short) } else { (short, long) }
+}
+fn scale_index(scale: Scale) -> usize {
+    SCALES.iter().position(|&(a,b)| Scale::new(a,b).ok().is_some_and(|candidate| (candidate.factor() - scale.factor()).abs() < 1e-9)).unwrap_or(0)
+}
+
 
 pub fn show(state: &mut State, ui: &mut egui::Ui, session: &solidcraft_engine::Session) {
     refresh_projection(state, session);
     ui.horizontal(|ui| {
         if ui.selectable_label(state.show_browser, "Views").clicked() { state.show_browser = !state.show_browser; }
         ui.separator();
-        ui.label("A3 landscape");
-        ui.checkbox(&mut state.show_view_labels, "Show View Labels");
-        egui::ComboBox::from_id_salt("drawing_orientation")
-            .selected_text(format!("{:?}", state.orientation))
-            .show_ui(ui, |ui| {
-                for v in NamedView::ALL { ui.selectable_value(&mut state.orientation, v, format!("{:?}", v)); }
-            });
-        egui::ComboBox::from_id_salt("drawing_scale")
-            .selected_text(format!("{}:{}", SCALES[state.scale_index].0, SCALES[state.scale_index].1))
-            .show_ui(ui, |ui| {
-                for (i, (paper, model)) in SCALES.iter().enumerate() {
-                    ui.selectable_value(&mut state.scale_index, i, format!("{}:{}", paper, model));
-                }
-            });
-        if ui.button("Base View").clicked() { state.place_mode = true; state.selected = None; }
+        let (sheet_name, _, _) = SHEETS[state.sheet_size];
+        ui.label(format!("{} {}", sheet_name, if state.landscape {"Landscape"} else {"Portrait"}));
+        if ui.button("Sheet Settings").clicked() { state.sheet_settings = !state.sheet_settings; state.edit_view = None; }
+        if ui.button("Base View").clicked() {
+            state.place_mode = true;
+            state.edit_view = None;
+            state.sheet_settings = false;
+            state.selected = None;
+        }
+        if ui.add_enabled(state.selected.is_some(), egui::Button::new("Edit View")).clicked() {
+            state.edit_view = state.selected;
+            if let Some(v) = state.placed.iter().find(|v| Some(v.id) == state.edit_view) {
+                state.orientation = v.orientation; state.scale_index = scale_index(v.frame.scale());
+            }
+            state.place_mode = false;
+            state.sheet_settings = false;
+        }
         if ui.button("Projected View").on_hover_text("Requires model projection; coming in a later revision").clicked() {
             // No placeholder geometry: projected views require actual model geometry.
         }
         if ui.button("Fit Sheet").clicked() { state.zoom = 1.0; state.pan = Vec2::ZERO; }
         if ui.add_enabled(state.selected.is_some(), egui::Button::new("Delete View")).clicked() { delete_selected(state); }
-        if ui.button("Cancel").clicked() { state.place_mode = false; }
+        if ui.button("Cancel").clicked() { state.place_mode = false; state.edit_view = None; state.sheet_settings = false; }
     });
     ui.separator();
     if state.place_mode {
@@ -70,7 +91,7 @@ pub fn show(state: &mut State, ui: &mut egui::Ui, session: &solidcraft_engine::S
         ui.label("Wheel: zoom at cursor  |  Middle-drag: pan  |  Click: select view  |  Delete: remove selected  |  Fit Sheet: reset view");
     }
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        if state.place_mode { state.place_mode = false; } else { state.selected = None; }
+        if state.place_mode || state.edit_view.is_some() || state.sheet_settings { state.place_mode = false; state.edit_view = None; state.sheet_settings = false; } else { state.selected = None; }
         state.drag_view = None;
     }
     if !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
@@ -88,17 +109,33 @@ pub fn show(state: &mut State, ui: &mut egui::Ui, session: &solidcraft_engine::S
         browser.add_space(10.0);
         browser.heading("Drawing");
         browser.separator();
-        browser.label("Sheet 1 · A3 Landscape");
+        browser.label(format!("Sheet 1 · {} {}", SHEETS[state.sheet_size].0,
+            if state.landscape { "Landscape" } else { "Portrait" }));
+        if browser.button("⚙ Sheet Settings").clicked() {
+            state.sheet_settings = true; state.place_mode = false; state.edit_view = None;
+        }
         browser.label("Views");
         if state.placed.is_empty() { browser.weak("No views placed"); }
+        let mut open_edit = None;
         for (i, view) in state.placed.iter().enumerate() {
-            if browser.selectable_label(state.selected == Some(view.id),
-                format!("V{} · {:?}", i + 1, view.orientation)).clicked() {
-                state.selected = Some(view.id);
-                state.place_mode = false;
+            let entry = browser.selectable_label(state.selected == Some(view.id),
+                format!("V{} · {:?}", i + 1, view.orientation));
+            if entry.clicked() { state.selected = Some(view.id); state.place_mode = false; }
+            if entry.double_clicked() { open_edit = Some(view.id); }
+        }
+        if let Some(id) = open_edit {
+            state.selected = Some(id); state.edit_view = Some(id); state.sheet_settings = false;
+            if let Some(v) = state.placed.iter().find(|v| v.id == id) {
+                state.orientation = v.orientation; state.scale_index = scale_index(v.frame.scale());
             }
         }
         if let Some(id) = state.selected {
+            if browser.button("Edit Selected View").clicked() {
+                state.edit_view = Some(id); state.sheet_settings = false;
+                if let Some(v) = state.placed.iter().find(|v| v.id == id) {
+                    state.orientation = v.orientation; state.scale_index = scale_index(v.frame.scale());
+                }
+            }
             if let Some(view) = state.placed.iter_mut().find(|v| v.id == id) {
                 browser.checkbox(&mut view.show_label, "Selected view label");
             }
@@ -111,6 +148,16 @@ pub fn show(state: &mut State, ui: &mut egui::Ui, session: &solidcraft_engine::S
         Pos2::new(area.min.x + browser_width, area.min.y), area.max);
     let mut canvas = ui.new_child(egui::UiBuilder::new().max_rect(canvas_rect).id_salt("drawing_canvas_v015"));
     draw_canvas(state, &mut canvas);
+    if state.place_mode || state.edit_view.is_some() || state.sheet_settings {
+        let palette_rect = Rect::from_min_size(
+            Pos2::new(canvas_rect.max.x - 265.0, canvas_rect.min.y + 12.0),
+            Vec2::new(253.0, 355.0));
+        let mut palette = ui.new_child(egui::UiBuilder::new().max_rect(palette_rect).id_salt("drawing_properties_palette"));
+        egui::Frame::new().fill(Color32::from_rgb(35, 39, 48))
+            .inner_margin(12.0).show(&mut palette, |ui| {
+                draw_properties(state, ui);
+            });
+    }
     ui.allocate_rect(area, Sense::hover());
 }
 
@@ -118,7 +165,8 @@ fn draw_canvas(state: &mut State, ui: &mut egui::Ui) {
     let available = ui.available_rect_before_wrap().size();
     let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
     painter.rect_filled(response.rect, 0.0, Color32::from_gray(55));
-    let base_factor = ((available.x - 40.0) / A3_W).min((available.y - 40.0) / A3_H).max(0.01);
+    let (sheet_w, sheet_h) = sheet_dimensions(state);
+    let base_factor = ((available.x - 40.0) / sheet_w).min((available.y - 40.0) / sheet_h).max(0.01);
     let factor = base_factor * state.zoom;
     let mut center = response.rect.center() + state.pan;
     let hovering = response.hovered();
@@ -140,14 +188,20 @@ fn draw_canvas(state: &mut State, ui: &mut egui::Ui) {
         state.pan += delta;
         center += delta;
     }
-    let paper = Rect::from_center_size(center, Vec2::new(A3_W * factor, A3_H * factor));
+    let paper = Rect::from_center_size(center, Vec2::new(sheet_w * factor, sheet_h * factor));
     let border = paper.shrink(10.0 * factor);
     painter.rect_filled(paper, 0.0, Color32::WHITE);
     painter.rect_stroke(paper, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Inside);
-    painter.rect_stroke(border, 0.0, Stroke::new(0.7_f32.max(factor * 0.5), Color32::DARK_GRAY), StrokeKind::Inside);
+    if state.show_border {
+        painter.rect_stroke(border, 0.0, Stroke::new(0.7_f32.max(factor * 0.5), Color32::DARK_GRAY), StrokeKind::Inside);
+    }
     let title = Rect::from_min_max(Pos2::new(border.max.x - 120.0 * factor, border.max.y - 35.0 * factor), border.max);
-    painter.rect_stroke(title, 0.0, Stroke::new(1.0, Color32::DARK_GRAY), StrokeKind::Inside);
-    painter.text(title.center(), egui::Align2::CENTER_CENTER, "SolidCraft · A3", egui::FontId::proportional(12.0), Color32::BLACK);
+    if state.show_title {
+        painter.rect_stroke(title, 0.0, Stroke::new(1.0, Color32::DARK_GRAY), StrokeKind::Inside);
+        painter.text(title.center(), egui::Align2::CENTER_CENTER,
+            format!("SolidCraft · {}", SHEETS[state.sheet_size].0),
+            egui::FontId::proportional(12.0), Color32::BLACK);
+    }
     if response.clicked() {
         if let Some(pointer) = response.interact_pointer_pos() {
             if state.place_mode && border.contains(pointer) {
@@ -165,6 +219,12 @@ fn draw_canvas(state: &mut State, ui: &mut egui::Ui) {
                 }
             } else if !state.place_mode {
                 state.selected = hit_view(state, paper, factor, pointer);
+                if response.double_clicked() {
+                    state.edit_view = state.selected; state.sheet_settings = false;
+                    if let Some(v) = state.placed.iter().find(|v| Some(v.id) == state.edit_view) {
+                        state.orientation = v.orientation; state.scale_index = scale_index(v.frame.scale());
+                    }
+                }
             }
         }
     }
@@ -190,6 +250,7 @@ fn draw_canvas(state: &mut State, ui: &mut egui::Ui) {
         if let Some(strokes) = state.projected.get(&view.orientation) {
             let ratio = view.frame.scale().factor() as f32;
             for stroke in strokes {
+                if stroke.hidden && !state.show_hidden { continue; }
                 let color = if stroke.uncertain { Color32::from_rgb(180, 100, 30) }
                     else if stroke.hidden { Color32::from_gray(145) }
                     else { Color32::BLACK };
@@ -229,6 +290,88 @@ fn draw_canvas(state: &mut State, ui: &mut egui::Ui) {
         painter.text(label_at, egui::Align2::CENTER_TOP,
             format!("V{} {:?} {}", i+1, view.orientation, view.frame.scale()),
             egui::FontId::proportional(12.0), c);
+    }
+    // Live preview: use the exact cached HLR strokes at the cursor, not a box.
+    if state.place_mode {
+        if let Some(pointer) = response.hover_pos().filter(|p| border.contains(*p)) {
+            if let Some(strokes) = state.projected.get(&state.orientation) {
+                let ratio = (SCALES[state.scale_index].0 / SCALES[state.scale_index].1) as f32;
+                for stroke in strokes {
+                    if stroke.hidden && !state.show_hidden { continue; }
+                    let color = if stroke.hidden { Color32::from_rgba_unmultiplied(45, 110, 210, 100) }
+                        else { Color32::from_rgb(45, 110, 210) };
+                    for pair in stroke.points.windows(2) {
+                        let a = Pos2::new(pointer.x + pair[0].x as f32 * ratio * factor,
+                            pointer.y - pair[0].y as f32 * ratio * factor);
+                        let b = Pos2::new(pointer.x + pair[1].x as f32 * ratio * factor,
+                            pointer.y - pair[1].y as f32 * ratio * factor);
+                        painter.line_segment([a,b], Stroke::new(1.1, color));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn draw_properties(state: &mut State, ui: &mut egui::Ui) {
+    if state.sheet_settings {
+        ui.heading("Sheet Settings");
+        ui.separator();
+        egui::ComboBox::from_id_salt("drawing_sheet_size")
+            .selected_text(SHEETS[state.sheet_size].0)
+            .show_ui(ui, |ui| {
+                for (i, (name, _, _)) in SHEETS.iter().enumerate() {
+                    ui.selectable_value(&mut state.sheet_size, i, *name);
+                }
+            });
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut state.landscape, true, "Landscape");
+            ui.selectable_value(&mut state.landscape, false, "Portrait");
+        });
+        ui.label("Projection standard");
+        ui.radio_value(&mut state.projection_first_angle, true, "First angle (ISO)");
+        ui.radio_value(&mut state.projection_first_angle, false, "Third angle");
+        ui.checkbox(&mut state.show_border, "Sheet border");
+        ui.checkbox(&mut state.show_title, "Title block");
+        if ui.button("Done").clicked() { state.sheet_settings = false; }
+        return;
+    }
+    let editing = state.edit_view.is_some();
+    ui.heading(if editing { "Edit Drawing View" } else { "Place Base View" });
+    ui.separator();
+    ui.label("Orientation");
+    let mut orientation = state.orientation;
+    egui::ComboBox::from_id_salt("drawing_palette_orientation")
+        .selected_text(format!("{:?}", orientation))
+        .show_ui(ui, |ui| {
+            for v in NamedView::ALL { ui.selectable_value(&mut orientation, v, format!("{:?}", v)); }
+        });
+    ui.label("Scale");
+    let mut scale_index = state.scale_index;
+    egui::ComboBox::from_id_salt("drawing_palette_scale")
+        .selected_text(format!("{}:{}", SCALES[scale_index].0, SCALES[scale_index].1))
+        .show_ui(ui, |ui| {
+            for (i, (a,b)) in SCALES.iter().enumerate() {
+                ui.selectable_value(&mut scale_index, i, format!("{}:{}", a,b));
+            }
+        });
+    state.orientation = orientation;
+    state.scale_index = scale_index;
+    ui.checkbox(&mut state.show_hidden, "Show hidden lines");
+    if let Some(id) = state.edit_view {
+        if let Some(view) = state.placed.iter_mut().find(|v| v.id == id) {
+            ui.checkbox(&mut view.show_label, "Show view label");
+            if let Ok(scale) = Scale::new(SCALES[scale_index].0, SCALES[scale_index].1) {
+                if let Ok(frame) = ViewFrame::new(orientation.basis(), scale, ModelVec2::ZERO, view.at) {
+                    view.frame = frame;
+                    view.orientation = orientation;
+                }
+            }
+        }
+        if ui.button("Done").clicked() { state.edit_view = None; }
+    } else {
+        ui.label("Move over the sheet to preview; click to place.");
+        if ui.button("Cancel").clicked() { state.place_mode = false; }
     }
 }
 
@@ -298,7 +441,7 @@ fn refresh_projection(state: &mut State, session: &solidcraft_engine::Session) {
     }).collect();
     for orientation in NamedView::ALL {
         let basis = orientation.basis();
-        let view = hlr::View { x: basis.x, y: basis.y, d: basis.x.cross(basis.y) };
+        let view = hlr::View { x: basis.x, y: basis.y, d: basis.y.cross(basis.x) };
         match hlr::hidden_lines(&defs, &placements, &view, &options, &|| false) {
             Ok(result) => {
                 let mut strokes = Vec::new();
