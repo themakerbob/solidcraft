@@ -1,4 +1,4 @@
-//! V0.1.10 Drawing workspace: selectable projected views and optional labels.
+//! V0.1.11 Drawing workspace: selectable projected views and optional labels.
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use solidcraft_geom::drawing_view::{NamedView, Scale, ViewFrame};
 use solidcraft_geom::Vec2 as ModelVec2;
@@ -21,7 +21,9 @@ pub struct State {
     show_browser: bool,
     show_view_labels: bool,
     model_revision: Option<(u64, u64)>,
-    projected: HashMap<NamedView, Vec<ProjectedStroke>>,
+    projected: HashMap<NamedView, Vec<ProjectedStroke>> ,
+    hlr_debug: HashMap<NamedView, Vec<DebugSegment>>,
+    export_message: Option<String>,
     projection_error: Option<String>,
     edit_view: Option<u64>,
     sheet_settings: bool,
@@ -30,15 +32,26 @@ pub struct State {
     show_border: bool,
     show_title: bool,
     show_hidden: bool,
+    visible_only_debug: bool,
     projection_first_angle: bool,
 
 }
 #[derive(Clone)]
-struct ProjectedStroke { points: Vec<ModelVec2>, hidden: bool, uncertain: bool }
+struct DebugSegment {
+    line_index: usize,
+    piece_index: usize,
+    segment_index: usize,
+    covered: bool,
+    visibility: &'static str,
+    points: Vec<ModelVec2>,
+    curve: Seg2,
+}
+#[derive(Clone)]
+struct ProjectedStroke { curve: Seg2, hidden: bool, uncertain: bool }
 struct PlacedView { id: u64, frame: ViewFrame, orientation: NamedView, at: ModelVec2, show_label: bool }
 impl Default for State {
     fn default() -> Self {
-        Self { active: false, orientation: NamedView::Front, scale_index: 0, placed: Vec::new(), place_mode: false, zoom: 1.0, pan: Vec2::ZERO, selected: None, next_view_id: 1, drag_view: None, show_browser: true, show_view_labels: true, model_revision: None, projected: HashMap::new(), projection_error: None, edit_view: None, sheet_settings: false, sheet_size: 1, landscape: true, show_border: true, show_title: true, show_hidden: true, projection_first_angle: false }
+        Self { active: false, orientation: NamedView::Front, scale_index: 0, placed: Vec::new(), place_mode: false, zoom: 1.0, pan: Vec2::ZERO, selected: None, next_view_id: 1, drag_view: None, show_browser: true, show_view_labels: true, model_revision: None, projected: HashMap::new(), hlr_debug: HashMap::new(), export_message: None, projection_error: None, edit_view: None, sheet_settings: false, sheet_size: 1, landscape: true, show_border: true, show_title: true, show_hidden: true, visible_only_debug: false, projection_first_angle: false }
     }
 }
 const SCALES: [(f64,f64); 5] = [(1.0,1.0),(1.0,2.0),(1.0,5.0),(1.0,10.0),(2.0,1.0)];
@@ -55,36 +68,69 @@ fn scale_index(scale: Scale) -> usize {
 }
 
 
-pub fn show(state: &mut State, ui: &mut egui::Ui, session: &solidcraft_engine::Session) {
-    refresh_projection(state, session);
-    ui.horizontal(|ui| {
-        if ui.selectable_label(state.show_browser, "Views").clicked() { state.show_browser = !state.show_browser; }
-        ui.separator();
-        let (sheet_name, _, _) = SHEETS[state.sheet_size];
-        ui.label(format!("{} {}", sheet_name, if state.landscape {"Landscape"} else {"Portrait"}));
-        if ui.button("Sheet Settings").clicked() { state.sheet_settings = !state.sheet_settings; state.edit_view = None; }
-        if ui.button("Base View").clicked() {
+
+/// Commands used by the native Drawing ribbon. Keep the same state transitions
+/// for ribbon actions and browser actions, rather than duplicating handlers.
+#[derive(Clone, Copy)]
+pub(crate) enum DrawingCommand { Base, Edit, Sheet, Fit, Delete, Cancel, ToggleBrowser }
+
+pub(crate) fn command_enabled(state: &State, command: DrawingCommand) -> bool {
+    match command {
+        DrawingCommand::Edit | DrawingCommand::Delete => state.selected.is_some(),
+        _ => true,
+    }
+}
+
+pub(crate) fn command_active(state: &State, command: DrawingCommand) -> bool {
+    match command {
+        DrawingCommand::Base => state.place_mode,
+        DrawingCommand::Edit => state.edit_view.is_some(),
+        DrawingCommand::Sheet => state.sheet_settings,
+        DrawingCommand::ToggleBrowser => state.show_browser,
+        _ => false,
+    }
+}
+
+pub(crate) fn run_command(state: &mut State, command: DrawingCommand) {
+    match command {
+        DrawingCommand::Base => {
             state.place_mode = true;
             state.edit_view = None;
             state.sheet_settings = false;
             state.selected = None;
         }
-        if ui.add_enabled(state.selected.is_some(), egui::Button::new("Edit View")).clicked() {
-            state.edit_view = state.selected;
-            if let Some(v) = state.placed.iter().find(|v| Some(v.id) == state.edit_view) {
-                state.orientation = v.orientation; state.scale_index = scale_index(v.frame.scale());
+        DrawingCommand::Edit => {
+            if let Some(id) = state.selected {
+                state.edit_view = Some(id);
+                if let Some(v) = state.placed.iter().find(|v| v.id == id) {
+                    state.orientation = v.orientation;
+                    state.scale_index = scale_index(v.frame.scale());
+                }
+                state.place_mode = false;
+                state.sheet_settings = false;
             }
+        }
+        DrawingCommand::Sheet => {
+            state.sheet_settings = true;
             state.place_mode = false;
+            state.edit_view = None;
+        }
+        DrawingCommand::Fit => { state.zoom = 1.0; state.pan = Vec2::ZERO; }
+        DrawingCommand::Delete => delete_selected(state),
+        DrawingCommand::Cancel => {
+            state.place_mode = false;
+            state.edit_view = None;
             state.sheet_settings = false;
         }
-        if ui.button("Projected View").on_hover_text("Requires model projection; coming in a later revision").clicked() {
-            // No placeholder geometry: projected views require actual model geometry.
-        }
-        if ui.button("Fit Sheet").clicked() { state.zoom = 1.0; state.pan = Vec2::ZERO; }
-        if ui.add_enabled(state.selected.is_some(), egui::Button::new("Delete View")).clicked() { delete_selected(state); }
-        if ui.button("Cancel").clicked() { state.place_mode = false; state.edit_view = None; state.sheet_settings = false; }
-    });
-    ui.separator();
+        DrawingCommand::ToggleBrowser => state.show_browser = !state.show_browser,
+    }
+}
+
+pub fn show(state: &mut State, ui: &mut egui::Ui, session: &solidcraft_engine::Session) {
+    ui.horizontal(|ui| { ui.checkbox(&mut state.visible_only_debug, "Visible only (debug)"); });
+    refresh_projection(state, session);
+    // Drawing commands live in the native SolidCraft ribbon, not a second toolbar.
+    // The browser and sheet canvas begin immediately below the ribbon.
     if state.place_mode {
         ui.label("Base View: click inside the sheet border to place an anchor. Press Escape to cancel.");
     } else {
@@ -141,8 +187,24 @@ pub fn show(state: &mut State, ui: &mut egui::Ui, session: &solidcraft_engine::S
             }
         }
         browser.separator();
+        if browser.button("Export HLR Debug (CSV)").clicked() {
+            state.export_message = Some(match export_hlr_debug(state) {
+                Ok(path) => format!("Exported: {}", path.display()),
+                Err(err) => format!("Export failed: {err}"),
+            });
+        }
+        if browser.button("Export Selected View (DXF)").clicked() {
+            state.export_message = Some(match export_hlr_dxf(state) {
+                Ok(path) => format!("Exported DXF: {}", path.display()),
+                Err(err) => format!("DXF export failed: {err}"),
+            });
+        }
+        if let Some(message) = &state.export_message {
+            browser.small(message);
+        }
         if let Some(err) = &state.projection_error { browser.colored_label(Color32::LIGHT_RED, err); }
         else { browser.weak("Exact HLR model projection"); }
+
     }
     let canvas_rect = Rect::from_min_max(
         Pos2::new(area.min.x + browser_width, area.min.y), area.max);
@@ -249,31 +311,48 @@ fn draw_canvas(state: &mut State, ui: &mut egui::Ui) {
         // then the canvas pixels/mm zoom. Keep drawing measurements in model units.
         if let Some(strokes) = state.projected.get(&view.orientation) {
             let ratio = view.frame.scale().factor() as f32;
-            for stroke in strokes {
-                if stroke.hidden && !state.show_hidden { continue; }
-                let color = if stroke.uncertain { Color32::from_rgb(180, 100, 30) }
-                    else if stroke.hidden { Color32::from_gray(145) }
-                    else { Color32::BLACK };
-                let width = if stroke.hidden { 0.8 } else { 1.2 };
-                for pair in stroke.points.windows(2) {
-                    let a = Pos2::new(p.x + pair[0].x as f32 * ratio * factor,
-                                      p.y - pair[0].y as f32 * ratio * factor);
-                    let b = Pos2::new(p.x + pair[1].x as f32 * ratio * factor,
-                                      p.y - pair[1].y as f32 * ratio * factor);
-                    if stroke.hidden { // short dashed segments, preserving visibility classification
-                        let delta = b - a;
-                        let len = delta.length();
-                        if len > 0.0 {
+            // Draw hidden and uncertain geometry underneath visible contours.
+            // HLR output order is not a paint order: a dashed hidden segment
+            // painted after a solid contour can make it appear broken at 1:1.
+            for pass in 0..2 {
+                for stroke in strokes {
+                    if state.visible_only_debug && (stroke.hidden || stroke.uncertain) { continue; }
+                    if stroke.hidden && !state.show_hidden { continue; }
+                    let is_visible = !stroke.hidden && !stroke.uncertain;
+                    if (pass == 1) != is_visible { continue; }
+                    let color = if stroke.uncertain { Color32::from_rgb(180, 100, 30) }
+                        else if stroke.hidden { Color32::from_gray(145) }
+                        else { Color32::BLACK };
+                    let width = if stroke.hidden { 1.0 } else { 1.4 };
+                    let sampled = adaptive_curve_points(&stroke.curve, ratio * factor, 0.20);
+                    let screen_points: Vec<Pos2> = sampled.iter().map(|point| {
+                        Pos2::new(p.x + point.x as f32 * ratio * factor,
+                                  p.y - point.y as f32 * ratio * factor)
+                    }).collect();
+                    if stroke.hidden {
+                        // Keep dash phase continuous along the entire polyline.
+                        // Dash lengths are screen pixels, independent of model zoom.
+                        let mut distance = 0.0_f32;
+                        for pair in screen_points.windows(2) {
+                            let (a, b) = (pair[0], pair[1]);
+                            let delta = b - a;
+                            let len = delta.length();
+                            if len <= f32::EPSILON { continue; }
                             let dir = delta / len;
-                            let mut t = 0.0;
+                            let mut t = 0.0_f32;
                             while t < len {
-                                let end = (t + 5.0).min(len);
-                                painter.line_segment([a + dir*t, a + dir*end], Stroke::new(width, color));
-                                t += 8.0;
+                                let phase = (distance + t) % 8.0;
+                                let step = (if phase < 5.0 { 5.0 - phase } else { 8.0 - phase }).min(len - t);
+                                if phase < 5.0 && step > 0.0 {
+                                    painter.line_segment([a + dir * t, a + dir * (t + step)], Stroke::new(width, color));
+                                }
+                                t += step.max(0.0001);
                             }
+                            distance += len;
                         }
-                    } else {
-                        painter.line_segment([a,b], Stroke::new(width,color));
+                    } else if screen_points.len() >= 2 {
+                        // A single AA path per original HLR curve; never merge separate edges.
+                        painter.add(egui::Shape::line(screen_points, Stroke::new(width, color)));
                     }
                 }
             }
@@ -281,7 +360,7 @@ fn draw_canvas(state: &mut State, ui: &mut egui::Ui) {
         if state.selected == Some(view.id) {
             let bounds = view_bounds(state, view, paper, factor);
             painter.rect_stroke(bounds.expand(7.0), 0.0,
-                Stroke::new(1.2, Color32::from_rgb(35, 110, 215)), StrokeKind::Outside);
+                Stroke::new(1.8, Color32::from_rgb(35, 110, 215)), StrokeKind::Outside);
         }
         if !(state.show_view_labels && view.show_label) { continue; }
         let bounds = view_bounds(state, view, paper, factor);
@@ -300,12 +379,16 @@ fn draw_canvas(state: &mut State, ui: &mut egui::Ui) {
                     if stroke.hidden && !state.show_hidden { continue; }
                     let color = if stroke.hidden { Color32::from_rgba_unmultiplied(45, 110, 210, 100) }
                         else { Color32::from_rgb(45, 110, 210) };
-                    for pair in stroke.points.windows(2) {
-                        let a = Pos2::new(pointer.x + pair[0].x as f32 * ratio * factor,
-                            pointer.y - pair[0].y as f32 * ratio * factor);
-                        let b = Pos2::new(pointer.x + pair[1].x as f32 * ratio * factor,
-                            pointer.y - pair[1].y as f32 * ratio * factor);
-                        painter.line_segment([a,b], Stroke::new(1.1, color));
+                    let preview_points: Vec<Pos2> =
+                        adaptive_curve_points(&stroke.curve, ratio * factor, 0.20)
+                            .into_iter()
+                            .map(|point| Pos2::new(
+                                pointer.x + point.x as f32 * ratio * factor,
+                                pointer.y - point.y as f32 * ratio * factor,
+                            ))
+                            .collect();
+                    if preview_points.len() >= 2 {
+                        painter.add(egui::Shape::line(preview_points, Stroke::new(1.1, color)));
                     }
                 }
             }
@@ -391,7 +474,7 @@ fn view_bounds(state: &State, view: &PlacedView, paper: Rect, factor: f32) -> Re
     let mut has_geometry = false;
     if let Some(strokes) = state.projected.get(&view.orientation) {
         for stroke in strokes {
-            for point in &stroke.points {
+            for point in adaptive_curve_points(&stroke.curve, ratio, 0.20) {
                 let pos = Pos2::new(p.x + point.x as f32 * ratio,
                                     p.y - point.y as f32 * ratio);
                 if !pos.x.is_finite() || !pos.y.is_finite() { continue; }
@@ -421,10 +504,16 @@ fn refresh_projection(state: &mut State, session: &solidcraft_engine::Session) {
     if state.model_revision == Some(key) { return; }
     state.model_revision = Some(key);
     state.projected.clear();
+    state.hlr_debug.clear();
+    state.export_message = None;
     state.projection_error = None;
     let model = session.world_state();
     if model.bodies.is_empty() { return; }
-    let options = hlr::Options::default();
+    // Technical drawings omit smooth/tangent face junctions by default.
+    // These are not physical creases: on a filleted plate they appear as
+    // spurious vertical lines at the start/end of each corner radius.
+    // True silhouette curves are generated independently by the HLR engine.
+    let options = hlr::Options { tangent_edges: false, ..hlr::Options::default() };
     let mut defs = Vec::new();
     for body in &model.bodies {
         match kernel::portable_brep(&body.body).and_then(|b| {
@@ -442,19 +531,35 @@ fn refresh_projection(state: &mut State, session: &solidcraft_engine::Session) {
     for orientation in NamedView::ALL {
         let basis = orientation.basis();
         let view = hlr::View { x: basis.x, y: basis.y, d: basis.y.cross(basis.x) };
-        match hlr::hidden_lines(&defs, &placements, &view, &options, &|| false) {
+        let projection = hlr::hidden_lines(&defs, &placements, &view, &options, &|| false);
+        match projection {
             Ok(result) => {
                 let mut strokes = Vec::new();
-                for line in result.lines {
-                    for piece in line.pieces {
-                        if piece.covered { continue; }
-                        for seg in piece.geometry {
+                let mut debug_segments = Vec::new();
+                for (line_index, line) in result.lines.into_iter().enumerate() {
+                    for (piece_index, piece) in line.pieces.into_iter().enumerate() {
+                        for (segment_index, seg) in piece.geometry.into_iter().enumerate() {
                             // All supported exact curve kinds are sampled for display only;
                             // geometry and dimensions remain in model millimetres.
-                            let n = match &seg { Seg2::Line { .. } => 1, _ => 32 };
-                            let points = (0..=n).map(|i| seg.point_at(i as f64/n as f64)).collect();
+                            // Debug samples are model-space and zoom independent.
+                            // The renderer tessellates the original analytic curve adaptively.
+                            let points = adaptive_curve_points(&seg, 1.0, 0.02);
+                            debug_segments.push(DebugSegment {
+                                line_index,
+                                piece_index,
+                                segment_index,
+                                covered: piece.covered,
+                                visibility: match piece.visibility {
+                                    hlr::Visibility::Visible => "visible",
+                                    hlr::Visibility::Hidden => "hidden",
+                                    hlr::Visibility::Uncertain => "uncertain",
+                                },
+                                points: points.clone(),
+                                curve: seg.clone(),
+                            });
+                            if piece.covered { continue; }
                             strokes.push(ProjectedStroke {
-                                points,
+                                curve: seg,
                                 hidden: piece.visibility == hlr::Visibility::Hidden,
                                 uncertain: piece.visibility == hlr::Visibility::Uncertain,
                             });
@@ -462,8 +567,160 @@ fn refresh_projection(state: &mut State, session: &solidcraft_engine::Session) {
                     }
                 }
                 state.projected.insert(orientation, strokes);
+                state.hlr_debug.insert(orientation, debug_segments);
             }
             Err(e) => { state.projection_error = Some(format!("Projection: {e}")); break; }
         }
     }
+}
+
+// V0.1.19: Export raw HLR segment data without changing the drawing renderer.
+// All coordinates are in projected model millimetres, before view scale/zoom.
+fn export_hlr_debug(state: &State) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    let dir = std::env::current_dir()?.join("drawing_debug");
+    std::fs::create_dir_all(&dir)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_millis();
+    let path = dir.join(format!("hlr_debug_{stamp}.csv"));
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+    writeln!(out, "view,line_index,piece_index,segment_index,covered,visibility,point_index,x_mm,y_mm,canvas_zoom,view_scale,visible_only,show_hidden")?;
+    for orientation in NamedView::ALL {
+        let Some(segments) = state.hlr_debug.get(&orientation) else { continue; };
+        let view_scale = state.placed.iter()
+            .find(|view| view.orientation == orientation)
+            .map(|view| view.frame.scale().factor())
+            .unwrap_or(1.0);
+        for segment in segments {
+            for (point_index, point) in segment.points.iter().enumerate() {
+                writeln!(out, "{:?},{},{},{},{},{},{},{:.12},{:.12},{:.8},{:.8},{},{}",
+                    orientation, segment.line_index, segment.piece_index,
+                    segment.segment_index, segment.covered, segment.visibility,
+                    point_index, point.x, point.y, state.zoom, view_scale,
+                    state.visible_only_debug, state.show_hidden)?;
+            }
+        }
+    }
+    out.flush()?;
+    Ok(path)
+}
+
+// V0.1.22: ASCII DXF R2000 export of raw HLR projected geometry.
+// Uses the same cached geometry as CSV, without display consolidation or zoom.
+// Every sampled curve segment becomes a LINE entity, preserving its classification.
+/// Adaptive subdivision in screen space (rendering) or millimetres (DXF).
+/// Midpoint + quarter-point tests detect curved and reversing spans that a
+/// single midpoint test would incorrectly classify as straight.
+fn adaptive_curve_points(curve: &Seg2, pixels_per_mm: f32, tolerance_px: f64) -> Vec<ModelVec2> {
+    if let Seg2::Line { a, b } = curve { return vec![*a, *b]; }
+    let scale = (pixels_per_mm as f64).max(1e-9);
+    let tolerance = tolerance_px.max(0.001) / scale;
+    let mut out = vec![curve.point_at(0.0)];
+    fn deviation(p: ModelVec2, a: ModelVec2, b: ModelVec2) -> f64 {
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let l2 = dx * dx + dy * dy;
+        if l2 <= 1e-24 { return ((p.x-a.x).powi(2)+(p.y-a.y).powi(2)).sqrt(); }
+        let t = (((p.x-a.x)*dx+(p.y-a.y)*dy)/l2).clamp(0.0,1.0);
+        ((p.x-a.x-t*dx).powi(2)+(p.y-a.y-t*dy).powi(2)).sqrt()
+    }
+    fn visit(curve: &Seg2, t0: f64, a: ModelVec2, t1: f64, b: ModelVec2,
+             tolerance: f64, depth: u32, out: &mut Vec<ModelVec2>) {
+        let dt = t1-t0;
+        let q1 = curve.point_at(t0+dt*0.25);
+        let mid = curve.point_at(t0+dt*0.5);
+        let q3 = curve.point_at(t0+dt*0.75);
+        let err = deviation(q1,a,b).max(deviation(mid,a,b)).max(deviation(q3,a,b));
+        if depth >= 16 || (err <= tolerance && depth >= 1) {
+            out.push(b);
+        } else {
+            visit(curve,t0,a,t0+dt*0.5,mid,tolerance,depth+1,out);
+            visit(curve,t0+dt*0.5,mid,t1,b,tolerance,depth+1,out);
+        }
+    }
+    visit(curve,0.0,curve.point_at(0.0),1.0,curve.point_at(1.0),tolerance,0,&mut out);
+    out
+}
+
+fn write_dxf_line(out: &mut impl std::io::Write, layer: &str, a: ModelVec2, b: ModelVec2) -> std::io::Result<()> {
+    if (a.x-b.x).abs()+(a.y-b.y).abs() < 1e-12 { return Ok(()); }
+    write!(out,"0\nLINE\n8\n{layer}\n10\n{:.12}\n20\n{:.12}\n30\n0\n11\n{:.12}\n21\n{:.12}\n31\n0\n",a.x,a.y,b.x,b.y)
+}
+
+fn write_dxf_polyline(out: &mut impl std::io::Write, layer: &str, points: &[ModelVec2]) -> std::io::Result<()> {
+    if points.len() < 2 { return Ok(()); }
+    write!(out,"0\nLWPOLYLINE\n8\n{layer}\n90\n{}\n70\n0\n",points.len())?;
+    for p in points { write!(out,"10\n{:.12}\n20\n{:.12}\n",p.x,p.y)?; }
+    Ok(())
+}
+
+fn export_hlr_dxf(state: &State) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    let orientation = state.selected
+        .and_then(|id| state.placed.iter().find(|view| view.id == id))
+        .map(|view| view.orientation)
+        .or_else(|| state.placed.first().map(|view| view.orientation))
+        .unwrap_or(state.orientation);
+    let segments = state.hlr_debug.get(&orientation).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "No projected HLR geometry for selected view")
+    })?;
+    let dir = std::env::current_dir()?.join("drawing_debug");
+    std::fs::create_dir_all(&dir)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_millis();
+    let path = dir.join(format!("hlr_{orientation:?}_{stamp}.dxf"));
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+    // Standard DXF layers: visible black, hidden red dashed, covered magenta,
+    // uncertain orange. Covered entities remain inspectable but are frozen by
+    // default so they cannot obscure the normal drawing.
+    write!(out, "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n")?;
+    write!(out, "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLTYPE\n70\n2\n")?;
+    write!(out, "0\nLTYPE\n2\nCONTINUOUS\n70\n0\n3\nSolid\n72\n65\n73\n0\n40\n0.0\n")?;
+    write!(out, "0\nLTYPE\n2\nHIDDEN\n70\n0\n3\nHidden\n72\n65\n73\n2\n40\n4.0\n49\n3.0\n74\n0\n49\n-1.0\n74\n0\n")?;
+    write!(out, "0\nENDTAB\n0\nTABLE\n2\nLAYER\n70\n4\n")?;
+    for (name, color, line_type, flags) in [
+        ("VISIBLE", 7, "CONTINUOUS", 0),
+        ("HIDDEN", 1, "HIDDEN", 0),
+        ("UNCERTAIN", 30, "CONTINUOUS", 0),
+        ("COVERED", 6, "CONTINUOUS", 1),
+    ] {
+        write!(out, "0\nLAYER\n2\n{name}\n70\n{flags}\n62\n{color}\n6\n{line_type}\n")?;
+    }
+    write!(out, "0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n")?;
+    for segment in segments {
+        let layer = if segment.covered { "COVERED" } else {
+            match segment.visibility {
+                "visible" => "VISIBLE",
+                "hidden" => "HIDDEN",
+                _ => "UNCERTAIN",
+            }
+        };
+        match &segment.curve {
+            Seg2::Line { a, b } => {
+                write_dxf_line(&mut out, layer, *a, *b)?;
+            }
+            Seg2::Arc { center, radius, start, sweep } if *radius > 0.0 && radius.is_finite() => {
+                // DXF ARC is counterclockwise; reverse negative sweeps by swapping endpoints.
+                // Full turns are CIRCLE entities; other intervals remain exact ARC entities.
+                let a0 = if *sweep >= 0.0 { *start } else { *start + *sweep };
+                let a1 = a0 + sweep.abs();
+                if sweep.abs() >= std::f64::consts::TAU - 1e-9 {
+                    write!(out, "0\nCIRCLE\n8\n{layer}\n10\n{:.12}\n20\n{:.12}\n30\n0\n40\n{:.12}\n", center.x, center.y, radius)?;
+                } else {
+                    write!(out, "0\nARC\n8\n{layer}\n10\n{:.12}\n20\n{:.12}\n30\n0\n40\n{:.12}\n50\n{:.12}\n51\n{:.12}\n", center.x, center.y, radius, a0.to_degrees().rem_euclid(360.0), a1.to_degrees().rem_euclid(360.0))?;
+                }
+            }
+            _ => {
+                // Non-circular conics / splines: adaptive, bounded model-space
+                // approximation until native rational spline DXF export is available.
+                let points = adaptive_curve_points(&segment.curve, 1.0, 0.01);
+                write_dxf_polyline(&mut out, layer, &points)?;
+            }
+        }
+    }
+    write!(out, "0\nENDSEC\n0\nEOF\n")?;
+    out.flush()?;
+    Ok(path)
 }
