@@ -40,6 +40,7 @@ solidcraft-geom = { path = "../geom" }
 nix = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+rfd = "0.15"
 # Updates: the folder the Windows installer recorded, so an install outside Program Files is still
 # updated by its installer (MIT; already in the tree as a build dependency).
 winreg = "0.56"

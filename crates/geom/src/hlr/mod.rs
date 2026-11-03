@@ -981,17 +981,49 @@ pub fn hidden_lines(defs: &[Prepared], scene: &[Placement], view: &View, opts: &
         }
         let p = scene.get(t.placement).ok_or(HlrError::Invalid("placement"))?;
         for piece in &mut pieces {
-            let mut pts = vec![view.screen(p.apply(c.at(piece.t[0])))];
-            pts.extend(t.samples.iter().filter(|(x, _)| *x > piece.t[0] && *x < piece.t[1]).map(|(_, s)| *s));
-            pts.push(view.screen(p.apply(c.at(piece.t[1]))));
+            // Coverage must compare the actual projected curve, not the chord of a
+            // sparsely sampled arc. Edge-on fillets often share their chord with a
+            // straight edge while bowing outside it; conversely, genuinely
+            // coincident front/back fillet arcs must suppress the hidden copy.
+            let screen_at = |u: f64| view.screen(p.apply(c.at(u)));
+            // Sample each nonempty spline knot span separately. A tiny span can contain
+            // a large bend; a midpoint test across the entire edge can miss it.
+            let mut breaks = vec![piece.t[0]];
+            if let C3::Spline { knots, .. } = c {
+                for &k in knots {
+                    if k > piece.t[0] && k < piece.t[1] && !breaks.contains(&k) {
+                        breaks.push(k);
+                    }
+                }
+            }
+            breaks.push(piece.t[1]);
+            breaks.sort_by(f64::total_cmp);
+            let mut pts = vec![screen_at(piece.t[0])];
+            let mut sag = 0.0_f64;
+            let target = ((1e-4 * scale).clamp(0.005, 0.5) * 0.1).max(1e-7);
+            for bounds in breaks.windows(2) {
+                let mut stack = vec![(bounds[0], bounds[1], screen_at(bounds[0]), screen_at(bounds[1]), 0usize)];
+                while let Some((a, b, pa, pb, depth)) = stack.pop() {
+                    let mid = a + (b - a) * 0.5;
+                    let q1 = a + (b - a) * 0.25;
+                    let q3 = a + (b - a) * 0.75;
+                    let deviation = [q1, mid, q3].iter()
+                        .map(|&u| point_segment(screen_at(u), pa, pb))
+                        .fold(0.0_f64, f64::max);
+                    if deviation > target && depth < 18 && mid > a && mid < b {
+                        let pm = screen_at(mid);
+                        stack.push((mid, b, pm, pb, depth + 1));
+                        stack.push((a, mid, pa, pm, depth + 1));
+                    } else {
+                        // The three interior probes are a numerical estimate, not a
+                        // certified bound. Allow headroom for peaks between probes.
+                        sag = sag.max(deviation * 1.25 + 1e-9);
+                        pts.push(pb);
+                    }
+                }
+            }
             piece.points = pts;
-            piece.sag = t
-                .samples
-                .windows(2)
-                .zip(&t.sags)
-                .filter(|(w, _)| w.get(1).is_some_and(|b| b.0 > piece.t[0]) && w.first().is_some_and(|a| a.0 < piece.t[1]))
-                .map(|(_, sag)| *sag)
-                .fold(0., f64::max);
+            piece.sag = sag;
         }
         stats.pieces += pieces.len();
         stats.uncertain_pieces += pieces.iter().filter(|p| p.visibility == Visibility::Uncertain).count();
@@ -1635,7 +1667,13 @@ fn cover(lines: &mut [Line], tol: f64, step: f64, cancel: &dyn Fn() -> bool) -> 
             segs.extend(p.points.windows(2).filter_map(|w| Some(((li, pi), p.visibility, *w.first()?, *w.get(1)?, p.sag))));
         }
     }
-    let reach = segs.iter().map(|s| s.4).fold(0., f64::max) * 2. + tol;
+    // Coverage is a *drawing-space coincidence* test, not a curve-fitting test.
+    // A large sag is common for an analytic arc projected nearly edge-on. Using that
+    // sag as a coincidence radius can erase the arc's exposed end while a straight
+    // middle edge happens to share its chord. Bound the coverage tolerance to the
+    // drawing's spatial sampling scale instead.
+    let coincidence_slack = (step * 0.01).max(tol);
+    let reach = coincidence_slack * 2. + tol;
     if segs.is_empty() {
         return Ok(());
     }
@@ -1677,7 +1715,7 @@ fn cover(lines: &mut [Line], tol: f64, step: f64, cancel: &dyn Fn() -> bool) -> 
         bucket
             .iter()
             .filter_map(|i| segs.get(*i))
-            .any(|(k, state, a, b, sag)| hides(key, own, *k, *state) && point_segment(q, *a, *b) <= tol + sag + slack)
+            .any(|(k, state, a, b, sag)| hides(key, own, *k, *state) && point_segment(q, *a, *b) <= tol + sag.min(coincidence_slack) + slack.min(coincidence_slack))
     };
     for (li, l) in lines.iter_mut().enumerate() {
         for (pi, p) in l.pieces.iter_mut().enumerate() {
@@ -1709,6 +1747,9 @@ fn cover(lines: &mut [Line], tol: f64, step: f64, cancel: &dyn Fn() -> bool) -> 
             if let [q] = p.points.as_slice() {
                 covered = near((li, pi), p.visibility, *q, p.sag);
             }
+            // The piece points above are adaptively sampled from the exact
+            // projected curve, so true coincident hidden arcs can now be covered
+            // without mistaking a bowed arc for its straight chord.
             p.covered = covered;
         }
     }

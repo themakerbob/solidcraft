@@ -1449,18 +1449,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
             return;
         }
         if drawing {
-            let tab_rect = Rect::from_min_max(pos2(ribbon_left, r.top()), pos2(r.right(), r.top() + TAB_ROW_HEIGHT));
-            painter.text(tab_rect.left_center() + vec2(16.0, 0.0), egui::Align2::LEFT_CENTER,
-                "DRAWING  /  SHEET  /  VIEWS", egui::FontId::proportional(15.0), t.text);
-            let tool_rect = Rect::from_min_max(pos2(ribbon_left + 12.0, r.top() + TAB_ROW_HEIGHT),
-                pos2(r.right() - 12.0, r.bottom()));
-            ui.scope_builder(egui::UiBuilder::new().max_rect(tool_rect), |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Drawing workspace · A3 landscape");
-                    ui.separator();
-                    ui.label("Base View  ·  Orientation  ·  Scale  ·  Fit Sheet — controls in drawing canvas");
-                });
-            });
+            drawing_ribbon(app, ui, r, ribbon_left, labels);
             return;
         }
         ribbon_tabs(app, ui, Rect::from_min_max(pos2(ribbon_left, r.top()), pos2(r.right(), r.top() + TAB_ROW_HEIGHT)));
@@ -2603,6 +2592,86 @@ fn grid_keys(app: &SolveApp, ui: &egui::Ui, cmds: &[&'static solidcraft_engine::
             m.move_focus(egui::FocusDirection::None);
         });
     }
+}
+
+
+/// Drawing ribbon uses the same card, theme tokens, icon artwork and ribbon
+/// dimensions as the Design workspace. Commands operate on the drawing state.
+fn drawing_ribbon(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, left: f32, labels: bool) {
+    use crate::drawing_workspace::{DrawingCommand as Cmd, command_active, command_enabled, run_command};
+    let t = Tokens::get();
+    let tab_top = r.top() + TAB_ROW_HEIGHT;
+    let button_top = tab_top + 7.0;
+    let button_height = if labels { BUTTON_HEIGHT - 5.0 } else { ICON_BUTTON_HEIGHT - 4.0 };
+    let mut x = left + 14.0;
+    // The File menu is deliberately compact. Drawing commands, not file commands,
+    // get the prominent ribbon space.
+    let groups: &[(&str, &str, Option<(&str, &str, Cmd)>, &[(&str, &str, Cmd)])] = &[
+        ("FILE", "save", None, &[("New", "sketch", Cmd::NewDrawing), ("Open", "view", Cmd::OpenDrawing), ("Save", "save", Cmd::SaveDrawing), ("Save As", "save", Cmd::SaveDrawingAs)]),
+        ("VIEWS", "sketch", Some(("Base", "sketch", Cmd::Base)), &[("Projected", "extrude", Cmd::Projected), ("Section", "sketch", Cmd::Section), ("Edit View", "move", Cmd::Edit)]),
+        ("DIMENSIONS", "smart-dimension", Some(("Smart Dim", "smart-dimension", Cmd::SmartDimension)), &[("Hole", "hole-callout", Cmd::HoleCallout), ("Pattern", "pattern-callout", Cmd::PatternCallout)]),
+        ("ANNOTATIONS", "leader-note", Some(("Note", "leader-note", Cmd::Note)), &[("Note", "leader-note", Cmd::Note), ("Leader Note", "leader-note", Cmd::LeaderNote), ("Centre Mark", "sketch", Cmd::CentreMark), ("Centre Line", "sketch", Cmd::CentreLine)]),
+        ("SHEET", "settings", Some(("Settings", "settings", Cmd::Sheet)), &[("Fit Sheet", "fit", Cmd::Fit), ("Browser", "view", Cmd::ToggleBrowser)]),
+        ("OUTPUT", "save", None, &[("Export HLR CSV", "save", Cmd::ExportCsv), ("Export DXF", "save", Cmd::ExportDxf)]),
+        ("EDIT", "delete", None, &[("Delete", "delete", Cmd::Delete), ("Cancel", "cancel", Cmd::Cancel)]),
+    ];
+    let available = (r.right() - x - 12.0).max(300.0);
+    let group_width = (available / groups.len() as f32).min(165.0);
+    for (name, icon, primary, entries) in groups {
+        let group_left = x;
+        let w = group_width - 8.0;
+        if let Some((label, primary_icon, cmd)) = primary {
+            let main_width = (w - 30.0).max(44.0);
+            let rect = Rect::from_min_size(pos2(x, button_top), vec2(main_width, button_height));
+            let enabled = command_enabled(&app.drawing_workspace, *cmd);
+            let selected = command_active(&app.drawing_workspace, *cmd);
+            let response = ui.interact(rect, ui.id().with(("drawing_primary", name)), if enabled {Sense::click()} else {Sense::hover()});
+            if selected || response.hovered() {ui.painter().rect_filled(rect.shrink(2.0), 4.0, t.input_fill());}
+            let icon_rect = Rect::from_center_size(pos2(rect.center().x, rect.top()+20.0), vec2(27.0,27.0));
+            if *primary_icon == "smart-dimension" {
+                let p=ui.painter();let c=if enabled {t.text}else{t.text_dim};let cx=icon_rect.center().x;let cy=icon_rect.center().y;
+                let stroke=Stroke::new(1.5,c);
+                p.line_segment([pos2(cx-10.0,cy-8.0),pos2(cx-10.0,cy+8.0)],stroke);
+                p.line_segment([pos2(cx+10.0,cy-8.0),pos2(cx+10.0,cy+8.0)],stroke);
+                p.line_segment([pos2(cx-10.0,cy),pos2(cx+10.0,cy)],stroke);
+                p.text(pos2(cx,cy-4.0),Align2::CENTER_BOTTOM,"D",FontId::proportional(11.0),c);
+            } else if *primary_icon == "leader-note" {
+                let p=ui.painter();let st=Stroke::new(1.5,if enabled {t.text}else{t.text_dim});let cx=icon_rect.center().x;let cy=icon_rect.center().y;
+                p.line_segment([pos2(cx-11.0,cy+10.0),pos2(cx,cy-2.0)],st);
+                p.line_segment([pos2(cx,cy-2.0),pos2(cx+11.0,cy-2.0)],st);
+            } else { icons::paint_icon(ui.painter(), icon_rect, primary_icon, if enabled {1.0}else{0.35}); }
+            if labels {ui.painter().text(pos2(rect.center().x,rect.bottom()-10.0),Align2::CENTER_CENTER,*label,FontId::proportional(10.0),if enabled {t.text}else{t.text_dim});}
+            if response.on_hover_text(*label).clicked() {run_command(&mut app.drawing_workspace,*cmd);}
+            x += main_width;
+        }
+        let dropdown_width = if primary.is_some() {30.0} else {w};
+        let rect = Rect::from_min_size(pos2(x,button_top),vec2(dropdown_width,button_height));
+        let response=ui.interact(rect,ui.id().with(("drawing_dropdown",name)),Sense::click());
+        let selected = false;
+        if selected || response.hovered(){ui.painter().rect_filled(rect.shrink(2.0),4.0,t.input_fill());}
+        if primary.is_none(){
+            icons::paint_icon(ui.painter(),Rect::from_center_size(pos2(rect.center().x,rect.top()+20.0),vec2(27.0,27.0)),icon,1.0);
+            if labels {ui.painter().text(pos2(rect.center().x,rect.bottom()-10.0),Align2::CENTER_CENTER,*name,FontId::proportional(10.0),t.text);}
+        }else{
+            ui.painter().text(rect.center(),Align2::CENTER_CENTER,"▾",FontId::proportional(17.0),t.text);
+        }
+        let response=response.on_hover_text(format!("{} tools",name));
+        egui::Popup::menu(&response).show(|ui|{
+            ui.set_min_width(178.0);
+            ui.label(egui::RichText::new(*name).strong());
+            ui.separator();
+            for (label,_icon,cmd) in *entries {
+                let enabled=command_enabled(&app.drawing_workspace,*cmd);
+                if ui.add_enabled(enabled,egui::Button::new(*label).min_size(vec2(164.0,26.0))).clicked(){
+                    run_command(&mut app.drawing_workspace,*cmd);
+                    ui.close();
+                }
+            }
+        });
+        x=group_left+group_width;
+        if x<r.right()-12.0 {t.secondary_line(ui.painter(),[pos2(x-5.0,button_top+5.0),pos2(x-5.0,r.bottom()-20.0)],t.border);}
+    }
+
 }
 
 /// A panel drop-down drawn as a grid of large icons (the `ribbon_icon_grid` preference, #4739):

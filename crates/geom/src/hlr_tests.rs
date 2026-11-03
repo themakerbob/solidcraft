@@ -2211,3 +2211,47 @@ fn chords_only_near_each_other_still_meet_their_crossings() {
     assert_eq!(crossings(&mut tracks, &ctx).unwrap(), 2);
     assert!(tracks.iter().all(|t| t.splits.len() == 2), "{:?}", tracks.iter().map(|t| &t.splits).collect::<Vec<_>>());
 }
+
+#[test]
+fn coverage_does_not_erase_bowed_corner_with_large_projection_sag() {
+    // Edge-on fillet: the curved end projects near a straight top/bottom
+    // contour, but its outer portion is not coincident with that contour.
+    // A conservative HLR must preserve the exposed curve, not mark it covered.
+    let make = |points: Vec<[f64; 2]>, sag: f64| Piece {
+        t: [0., 1.], visibility: Visibility::Visible, covered: false,
+        geometry: Vec::new(), accuracy: CurveAccuracy::Analytic, points, sag,
+    };
+    let mut lines = vec![
+        Line { placement: 0, source: Source::Edge { edge: 0, tangent: false },
+            pieces: vec![make(vec![[0., 0.], [10., 0.]], 0.)] },
+        Line { placement: 0, source: Source::Edge { edge: 1, tangent: false },
+            pieces: vec![make(vec![[9., 0.], [10.5, 0.05], [12., 0.]], 2.)] },
+    ];
+    cover(&mut lines, 1e-7, 0.005, &never).unwrap();
+    assert!(!lines[1].pieces[0].covered, "exposed rounded corner was suppressed");
+}
+
+#[test]
+fn edge_on_corner_hidden_copy_is_covered_but_exposed_arc_is_preserved() {
+    // The front and rear rounded-corner arcs project onto the same contour.
+    // The visible arc must suppress the hidden copy, while an exposed arc
+    // that bows away from the straight contour must remain drawable.
+    let make = |visibility: Visibility, points: Vec<[f64; 2]>| Piece {
+        t: [0., 1.], visibility, covered: false,
+        geometry: Vec::new(), accuracy: CurveAccuracy::Analytic,
+        points, sag: 0.,
+    };
+    let arc = vec![[0., 0.], [0.5, 0.12], [1., 0.2], [1.5, 0.12], [2., 0.]];
+    let mut lines = vec![
+        Line { placement: 0, source: Source::Edge { edge: 0, tangent: false },
+            pieces: vec![make(Visibility::Visible, arc.clone())] },
+        Line { placement: 0, source: Source::Edge { edge: 1, tangent: false },
+            pieces: vec![make(Visibility::Hidden, arc)] },
+        Line { placement: 0, source: Source::Edge { edge: 2, tangent: false },
+            pieces: vec![make(Visibility::Visible, vec![[0., 0.], [2., 0.]])] },
+    ];
+    cover(&mut lines, 1e-7, 0.005, &never).unwrap();
+    assert!(!lines[0].pieces[0].covered, "visible corner contour was lost");
+    assert!(lines[1].pieces[0].covered, "coincident hidden corner must not be dotted");
+    assert!(!lines[2].pieces[0].covered, "straight outline must not be erased by a bowed arc");
+}
