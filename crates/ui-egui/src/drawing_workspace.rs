@@ -1,8 +1,8 @@
 //! V0.1.27 Drawing workspace: depth-buffered shaded views and analytic HLR overlays.
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use solidcraft_geom::drawing_view::{NamedView, Scale, ViewFrame};
-use solidcraft_geom::Vec2 as ModelVec2;
-use solidcraft_engine::geom::{hlr, Seg2, Vec3};
+use solidcore_record::{Vec2 as ModelVec2, Seg2, Vec3};
+use solidcraft_geom::{hlr, Seg2Geom, Vec3Geom};
 use solidcraft_engine::kernel;
 use std::collections::HashMap;
 
@@ -3744,7 +3744,13 @@ fn refresh_projection(state: &mut State, session: &solidcraft_engine::Session, c
     state.shaded.clear();
     state.hlr_debug.clear();
     state.projection_error = None;
-    let model = session.world_state();
+    let model = match session.world_state() {
+        Ok(model) => model,
+        Err(err) => {
+            state.projection_error = Some(format!("Unable to retrieve model state: {err}"));
+            return;
+        }
+    };
     if model.bodies.is_empty() { return; }
     for body in &model.bodies {
         let mesh=body.mesh();
@@ -3761,7 +3767,7 @@ fn refresh_projection(state: &mut State, session: &solidcraft_engine::Session, c
     let options = hlr::Options { tangent_edges: false, ..hlr::Options::default() };
     let mut defs = Vec::new();
     for body in &model.bodies {
-        match kernel::portable_brep(&body.body).and_then(|b| {
+        match kernel::brep_record(&body.body).and_then(|b| {
             hlr::prepare(&b, &options).map_err(|e| kernel::KernelError::Invalid(e.to_string()))
         }) {
             Ok(prepared) => defs.push(prepared),
@@ -4406,15 +4412,49 @@ fn pdf_sheet_page(state:&State, snapshot:&DrawingSnapshot)->DrawingPdfPage {
                 if let Some(view)=snapshot.placed.iter().find(|v|v.id==*view_id&&v.visible) {
                     let (a,b,t,label)=smart_dimension_points(view,geometry,*offset,*text_shift,paper,1.0);
                     let a=pdf_screen_point(a,h);let b=pdf_screen_point(b,h);let t=pdf_screen_point(t,h);
-                    pdf.line(a,b,weight as f64);
-                    // Filled-looking arrowheads, represented by two fine vector strokes.
-                    let dx=b.0-a.0;let dy=b.1-a.1;let length=dx.hypot(dy);
-                    if length>1e-6 {
-                        let ux=dx/length;let uy=dy/length;
-                        for (p,dir) in [(a,1.0),(b,-1.0)] {
-                            let tip=(p.0+ux*dir*2.5,p.1+uy*dir*2.5);
-                            pdf.line(p,(tip.0-uy*0.8,tip.1+ux*0.8),0.25);
-                            pdf.line(p,(tip.0+uy*0.8,tip.1-ux*0.8),0.25);
+                    if matches!(geometry,SmartGeometry::Radius{..}) {
+                        // Match the editor's radius leader geometry.
+                        // Calculate the landing in screen coordinates before
+                        // converting to PDF's bottom-left coordinate system.
+                        let arrow_screen=smart_to_screen(
+                            view,
+                            match geometry {
+                                SmartGeometry::Radius{center,radius,angle,..} =>
+                                    ModelVec2::new(
+                                        center.x+radius*angle.cos(),
+                                        center.y+radius*angle.sin()
+                                    ),
+                                _ => unreachable!(),
+                            },
+                            paper,1.0
+                        );
+                        let text_screen=Pos2::new(t.0 as f32,(h-t.1) as f32);
+                        let landing_screen=leader_landing(arrow_screen,text_screen,8.0);
+                        let landing=pdf_screen_point(landing_screen,h);
+
+                        pdf.line(a,landing,weight as f64);
+                        pdf.line(landing,t,weight as f64);
+
+                        let dx=landing.0-a.0;
+                        let dy=landing.1-a.1;
+                        let length=dx.hypot(dy);
+                        if length>1e-6 {
+                            let ux=dx/length;let uy=dy/length;
+                            let tip=(a.0+ux*2.5,a.1+uy*2.5);
+                            pdf.line(a,(tip.0-uy*0.8,tip.1+ux*0.8),0.25);
+                            pdf.line(a,(tip.0+uy*0.8,tip.1-ux*0.8),0.25);
+                        }
+                    } else {
+                        pdf.line(a,b,weight as f64);
+                        // Existing distance and angle dimension arrows.
+                        let dx=b.0-a.0;let dy=b.1-a.1;let length=dx.hypot(dy);
+                        if length>1e-6 {
+                            let ux=dx/length;let uy=dy/length;
+                            for (p,dir) in [(a,1.0),(b,-1.0)] {
+                                let tip=(p.0+ux*dir*2.5,p.1+uy*dir*2.5);
+                                pdf.line(p,(tip.0-uy*0.8,tip.1+ux*0.8),0.25);
+                                pdf.line(p,(tip.0+uy*0.8,tip.1-ux*0.8),0.25);
+                            }
                         }
                     }
                     if let SmartGeometry::Distance{a:origin,b:end,..}=geometry {
@@ -4669,7 +4709,12 @@ fn deserialize_sheet(sheet: &serde_json::Value) -> std::io::Result<DrawingSnapsh
     for v in sheet["views"].as_array().ok_or_else(invalid)? {
         let orientation=match v["orientation"].as_str().ok_or_else(invalid)? {
             "Front"=>NamedView::Front,"Back"=>NamedView::Back,"Left"=>NamedView::Left,"Right"=>NamedView::Right,
-            "Top"=>NamedView::Top,"Bottom"=>NamedView::Bottom,_=>return Err(invalid())};
+            "Top"=>NamedView::Top,"Bottom"=>NamedView::Bottom,
+            "IsoFrontRight"=>NamedView::IsoFrontRight,
+            "IsoFrontLeft"=>NamedView::IsoFrontLeft,
+            "IsoBackRight"=>NamedView::IsoBackRight,
+            "IsoBackLeft"=>NamedView::IsoBackLeft,
+            _=>return Err(invalid())};
         let factor=v["scale"].as_f64().ok_or_else(invalid)?;
         let scale=Scale::new(factor,1.0).map_err(|_|invalid())?;
         let at=ModelVec2::new(v["x"].as_f64().ok_or_else(invalid)?,v["y"].as_f64().ok_or_else(invalid)?);

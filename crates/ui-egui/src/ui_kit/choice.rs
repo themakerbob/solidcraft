@@ -12,6 +12,8 @@ use egui::{Ui, vec2};
 /// Text segments retain mixed states and optional compact clipping instead of dropdown fallback.
 #[derive(Default)]
 pub(crate) struct Segments<'a> {
+    /// Explicit focus requested by the owning form when a setting is opened for editing.
+    pub focus: Option<usize>,
     /// Per-option availability; omitted entries are enabled. Unavailable options stay faded.
     pub enabled: &'a [bool],
     /// Optional per-option refusal reasons. Disabled options remain visible and explain why.
@@ -41,6 +43,7 @@ pub(crate) fn segmented(ui: &mut Ui, selected: &mut usize, options: &[&str], con
         crate::prefs_search::reveal(ui);
     }
     let Segments {
+        focus,
         enabled,
         disabled,
         targets,
@@ -127,6 +130,9 @@ pub(crate) fn segmented(ui: &mut Ui, selected: &mut usize, options: &[&str], con
         let ui = &mut segment_ui;
         let segment_enabled = ui.is_enabled();
         let response = ui.interact(segment, id, egui::Sense::click());
+        if focus == Some(index) && segment_enabled && ui.is_visible() && ui.is_rect_visible(segment) {
+            response.request_focus();
+        }
         let on = states.get(index).copied().unwrap_or(*selected == index);
         let rounding = egui::CornerRadius {
             nw: if index == 0 { t.control_radius } else { 0 },
@@ -201,7 +207,12 @@ pub(crate) fn segmented(ui: &mut Ui, selected: &mut usize, options: &[&str], con
         }
     }
     if t.borders.bevel.is_none() {
-        ui.painter().rect_stroke(rect, t.control_radius, t.control_border_stroke(t.control_border), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(
+            rect,
+            t.control_radius,
+            t.control_border_stroke(if options.len() == 1 && states.first() == Some(&true) { t.form_primary } else { t.control_border }),
+            egui::StrokeKind::Inside,
+        );
     }
     scenario::publish_target_as(&format!("dialog:{}", label(ui)), &format!("dialog:segments:{}", label(ui)), rect);
     clicked
@@ -337,14 +348,20 @@ pub(crate) fn checkbox_row(ui: &mut egui::Ui, key: &str, label: &str, on: bool) 
 
 /// Compact bold/italic toggles for text. Tokens: scope font/control tokens.
 /// The glyphs keep the familiar B/I treatment; accessible names use translated style names.
-pub(crate) fn text_emphasis(ui: &mut Ui, bold: &mut bool, italic: &mut bool) {
+pub(crate) fn text_emphasis(ui: &mut Ui, bold: &mut bool, italic: &mut bool, bold_enabled: bool) {
     use crate::fonts::RichTextExt as _;
-    for (key, text, value, id) in [
-        ("Bold", egui::RichText::new("B").semibold(), bold, "sketch_text.bold"),
-        ("Italic", egui::RichText::new("I").italics(), italic, "sketch_text.italic"),
+    for (key, text, value, id, enabled) in [
+        ("Bold", egui::RichText::new("B").semibold(), bold, "sketch_text.bold", bold_enabled),
+        ("Italic", egui::RichText::new("I").italics(), italic, "sketch_text.italic", true),
     ] {
-        let response = ui.toggle_value(value, text).on_hover_text(crate::i18n::tr(id));
-        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), *value, crate::i18n::tr(id)));
+        if !enabled {
+            *value = false;
+        }
+        let mut response = ui.add_enabled_ui(enabled, |ui| ui.toggle_value(value, text).on_hover_text(crate::i18n::tr(id))).inner;
+        if !enabled {
+            response = response.on_disabled_hover_text(crate::i18n::tr("sketch_text.no_bold"));
+        }
+        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled() && enabled, *value, crate::i18n::tr(id)));
         scenario::publish_target_as(&format!("dialog:{key}"), &format!("dialog:emphasis:{key}"), response.rect);
     }
 }
@@ -422,7 +439,26 @@ pub(crate) fn list_picker(ui: &mut Ui, key: &str, text: &str, selected: bool) ->
 
 /// Intrinsic-width selection chip for horizontal lists, sharing list-picker styling.
 pub(crate) fn choice_chip(ui: &mut Ui, key: &str, text: &str, selected: bool) -> egui::Response {
+    crate::prefs_search::note_unlabelled(ui, &[text]);
+    if crate::prefs_search::querying(ui) && !crate::prefs_search::visible(ui, &[text]) {
+        return crate::prefs_search::hidden_response(ui);
+    }
     let t = Tokens::get();
+    if super::settings_page_active(ui) {
+        let font = if selected { crate::fonts::semibold(t.font_small) } else { egui::FontId::proportional(t.font_small) };
+        let width = ui.painter().layout_no_wrap(text.to_owned(), font.clone(), t.form_ink).size().x + t.space_16;
+        let response = ui.add_sized(
+            vec2(width.min(dimension(ui.max_rect().width())), t.space_24 - t.space_2),
+            egui::Button::selectable(selected, egui::RichText::new(text).font(font).color(if selected { t.selected_ink } else { t.form_ink }))
+                .fill(if selected { t.selected_bg } else { t.control_fill })
+                .stroke(egui::Stroke::new(1.0, if selected { t.form_primary } else { t.control_border }))
+                .corner_radius(t.radius_xl),
+        );
+        crate::prefs_search::remember(ui, text, response.rect);
+        crate::prefs_search::follow(ui, text, response.rect);
+        crate::scenario::publish_target(&format!("dialog:list:{key}"), response.rect);
+        return response;
+    }
     if super::layout::in_catalog(ui) {
         let accent = crate::theme::TabAccent::current(ui.ctx());
         let width = ui.painter().layout_no_wrap(text.to_string(), crate::fonts::semibold(t.font_small), t.form_ink).size().x + t.space_16;
@@ -445,6 +481,26 @@ pub(crate) fn choice_chip(ui: &mut Ui, key: &str, text: &str, selected: bool) ->
     let response = ui.add_sized(vec2(width, super::row_height()), egui::Button::selectable(selected, text).truncate());
     crate::scenario::publish_target(&format!("dialog:list:{key}"), response.rect);
     response
+}
+
+/// An independently indexed toolbar visibility chip using the standard icon segments.
+pub(crate) fn settings_tab_chip(ui: &mut Ui, key: &str, text: &str, icon: &str, on: bool) -> bool {
+    let t = Tokens::get();
+    let width = (super::ContentWidth::name(ui, text) + t.space_16 + t.space_14 + t.space_6 + t.space_4).min(dimension(ui.available_width()));
+    ui.allocate_ui_with_layout(vec2(width, t.control_height), egui::Layout::top_down(egui::Align::Min), |ui| {
+        super::settings_form(ui, 0.0, |ui| {
+            super::row(ui, text, |ui| {
+                let target = format!("prefs:toolbar_tab:{key}");
+                segmented(
+                    ui,
+                    &mut 0,
+                    &[text],
+                    Segments { states: &[on], icons: &[icon], targets: &[&target], compact: true, intrinsic: true, ..Default::default() },
+                )
+            })
+        })
+    })
+    .inner
 }
 
 /// Thumbnail variant of the shared selection chip. No document or render-job ownership.
