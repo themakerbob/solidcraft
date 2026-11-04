@@ -1,0 +1,1 @@
+Fix Projected ribbon command (previously None), move CSV/DXF export commands to functional UTILITIES ribbon tab. Only two modified files. Based on V0.1.24d drawing_workspace.rs and supplied src(6).zip toolbar.rs. Not compile tested.

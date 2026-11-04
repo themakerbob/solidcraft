@@ -2608,7 +2608,7 @@ fn drawing_ribbon(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, left: f32, lab
     // get the prominent ribbon space.
     let groups: &[(&str, &str, Option<(&str, &str, Cmd)>, &[(&str, &str, Cmd)])] = &[
         ("FILE", "save", None, &[("New", "sketch", Cmd::NewDrawing), ("Open", "view", Cmd::OpenDrawing), ("Save", "save", Cmd::SaveDrawing), ("Save As", "save", Cmd::SaveDrawingAs)]),
-        ("VIEWS", "sketch", Some(("Base", "sketch", Cmd::Base)), &[("Projected", "extrude", Cmd::Projected), ("Section", "sketch", Cmd::Section), ("Edit View", "move", Cmd::Edit)]),
+        ("VIEWS", "sketch", Some(("Base", "sketch", Cmd::Base)), &[("Projected", "extrude", Cmd::Projected), ("Section", "sketch", Cmd::Section), ("Detail View", "sketch", Cmd::Detail), ("Edit View", "move", Cmd::Edit)]),
         ("DIMENSIONS", "smart-dimension", Some(("Smart Dim", "smart-dimension", Cmd::SmartDimension)), &[("Hole", "hole-callout", Cmd::HoleCallout), ("Pattern", "pattern-callout", Cmd::PatternCallout)]),
         ("ANNOTATIONS", "leader-note", Some(("Note", "leader-note", Cmd::Note)), &[("Note", "leader-note", Cmd::Note), ("Leader Note", "leader-note", Cmd::LeaderNote), ("Centre Mark", "sketch", Cmd::CentreMark), ("Centre Line", "sketch", Cmd::CentreLine)]),
         ("SHEET", "settings", Some(("Settings", "settings", Cmd::Sheet)), &[("Fit Sheet", "fit", Cmd::Fit), ("Browser", "view", Cmd::ToggleBrowser)]),

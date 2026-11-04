@@ -1,0 +1,1 @@
+SolidCraft Drawing V0.1.11 native-themed ribbon. Extract into repository root. Run cargo check -p solidcraft-ui-egui. The Projected button is disabled until implemented. Existing Drawing functionality remains in drawing_workspace.rs. This patch has not been compiled in this environment.

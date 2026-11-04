@@ -1,0 +1,1 @@
+V0.1.25d: Align projected view outlines by actual HLR geometry bounds rather than local origins. Applies to live preview and placement through shared projected_target(). Based on V0.1.25c. Not compile-tested.

@@ -1,0 +1,1 @@
+Fix projected_target orientation mapping for all six orthographic parent views, preserving selected parent, inherited scale and parent linkage. Based on V0.1.25 shading preview. Run cargo check -p solidcraft-ui-egui. Not compile tested here.

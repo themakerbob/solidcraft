@@ -1,0 +1,1 @@
+SolidCraft Drawing V0.1.20: renderer-only path joins, identical-stroke deduplication, and continuous egui Shape::line. Raw HLR CSV export unchanged. Apply over V0.1.19. cargo check -p solidcraft-ui-egui && cargo run -p solidcraft. Rust build not verified in this environment.

@@ -1,0 +1,1 @@
+V0.1.24c: Remove duplicate action icon row from floating Drawing browser. Existing ribbon commands unchanged. Browser tree, visibility controls, document settings, and renderer unchanged. Apply at repository root. Not compile-tested.
